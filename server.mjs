@@ -144,4 +144,9 @@ export const server=http.createServer(async(req,res)=>{
  fail(404,'No encontrado.');
  }catch(e){json(e.status||500,{error:e.status?e.message:e.name==='TimeoutError'?'El proveedor tardó demasiado. Inténtalo de nuevo.':'No se pudo completar la solicitud.'})}
 });
-if(process.env.NODE_ENV!=='test')server.listen(Number(process.env.PORT||3000),process.env.HOST||'127.0.0.1',()=>console.log(`Psynapse Connect: http://localhost:${process.env.PORT||3000}`));
+if (process.env.NODE_ENV !== 'test') {
+  const PORT = process.env.PORT || 3000;
+  server.listen(PORT, () => {
+    console.log(`Servidor activo en el puerto ${PORT}`);
+  });
+}
