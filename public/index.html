@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Psynapse Connect · Tu espacio para crear</title><link rel="stylesheet" href="/style.css"><script src="/app.js" type="module"></script></head>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Psynapse Connect · Tu espacio para crear</title><link rel="manifest" href="/manifest.json"><meta name="theme-color" content="#0f172a"><link rel="stylesheet" href="/style.css"><link rel="icon" href="/icon.svg" type="image/svg+xml"><script src="/app.js" type="module"></script></head>
 <body><div class="brand-backdrop" aria-hidden="true"><video id="brand-video" autoplay muted loop playsinline preload="metadata" poster="/assets/logo.png"><source src="/assets/background.mp4" type="video/mp4"></video></div>
 <section id="auth" class="auth"><div class="intro"><div class="brand"><img src="/assets/logo.png" alt="" width="46" height="46"><span class="brand-name">PSYNAPSE <small>CONNECT</small></span></div><div class="eyebrow">DE LA IDEA AL NAVEGADOR</div><h1>Tu próximo proyecto<br>empieza aquí<span>.</span></h1><p>Escribe, experimenta y crea con IA.<br>Un espacio de desarrollo que va contigo.</p><div class="tags"><span>HTML / CSS / JS</span><span>Tu IA, tus claves</span></div></div><form id="auth-form" class="card"><div class="eyebrow">BIENVENIDO A TU ESPACIO</div><h2 id="auth-title">Inicia sesión</h2><label>Correo electrónico<input id="email" type="email" autocomplete="email" required placeholder="tu@correo.com"></label><label>Contraseña<input id="password" type="password" minlength="10" maxlength="128" autocomplete="current-password" required placeholder="Mínimo 10 caracteres"></label><button class="primary" id="auth-submit">Entrar a mi espacio →</button><button type="button" id="auth-toggle" class="link">¿Primera vez? Crear una cuenta</button><p id="auth-error" role="alert"></p></form></section>
 <div id="workspace" hidden>
@@ -13,5 +13,12 @@
 </main></div></div>
 <dialog id="settings"><form id="key-form"><div class="section-head"><h2>Conecta tu IA</h2><button type="button" id="close-settings" aria-label="Cerrar">✕</button></div><p>Usa tu propia cuenta. Tú eliges el proveedor y el modelo.</p><label>Proveedor<select id="key-provider"><option value="openrouter">OpenRouter</option><option value="groq">Groq</option></select></label><ol><li>Crea una cuenta en <a id="provider-link" href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer">OpenRouter</a>.</li><li>Abre la sección API Keys y genera una clave. Revisa el saldo y los límites de tu cuenta.</li><li>Pega la clave aquí. Validaremos la conexión y cargaremos los modelos disponibles.</li></ol><label>Clave API<input id="api-key" type="password" autocomplete="off" required placeholder="Pega tu clave privada"></label><p class="key-note">La conexión se guarda cifrada en el servidor y pertenece a tu cuenta. Se conserva al cerrar sesión. Las claves guardadas nunca se envían al navegador ni al chat.</p><div class="dialog-actions"><button class="primary" id="connect-key">Validar y conectar</button><button type="button" id="disconnect-key">Desconectar proveedor</button></div><p id="key-status" role="status"></p></form></dialog>
 <div id="toast" role="status" hidden></div>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch(err => console.error('SW Error:', err));
+    });
+  }
+</script>
 </body></html>
 
