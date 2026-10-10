@@ -1,0 +1,11 @@
+data/
+node_modules/
+.env
+.environment-check.txt
+preview-mobile.png
+validation-chat.png
+validation-connections.png
+server-output.log
+server-error.log
+*.key
+validation-zen.png
