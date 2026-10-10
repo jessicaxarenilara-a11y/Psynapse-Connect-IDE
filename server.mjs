@@ -1,7 +1,7 @@
 import {projectFiles,zipFiles,zipName} from './project-export.mjs';
 import {contextInfo,readUsage,totals} from './usage.mjs';
 import http from 'node:http';
-import {readFileSync,writeFileSync,mkdirSync,existsSync,renameSync} from 'node:fs';
+import {readFileSync,mkdirSync,existsSync} from 'node:fs';
 import {randomBytes,randomUUID,scryptSync,timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
@@ -9,21 +9,35 @@ import {systemPrompt,planPrompt,validateResponse,fingerprint} from './ai-changes
 import {normalizeModels} from './model-catalog.mjs';
 import {googleBase,googlePrices,fetchModelRows,googleRequest,googleResponse} from './cloud-providers.mjs';
 import {openVault} from './connection-vault.mjs';
+import pg from 'pg';
+
+const { Pool } = pg;
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
 const root=path.dirname(fileURLToPath(import.meta.url));
 const dir=process.env.DATA_DIR||path.join(root,'data'); mkdirSync(dir,{recursive:true});
-const file=path.join(dir,'store.json');
-let db=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):{users:[],projects:[]};
-const vault=openVault({root,dataDir:dir,hasConnections:db.users.some(u=>Object.keys(u.connections||{}).length)});
-const userConnections=session=>db.users.find(u=>u.id===session.userId)?.connections||{};
+let db={projects:[],usage:[]};
+const vault=openVault({root,dataDir:dir,hasConnections:true});
+
+const userConnections=session=>session.connections||{};
 const connectedProviders=session=>Object.keys(userConnections(session));
 const connectionKey=(session,provider)=>{const record=userConnections(session)[provider];return record?vault.decrypt(record.secret,session.userId,provider):null};
 const connectionInfo=session=>Object.entries(userConnections(session)).map(([provider,r])=>({provider,status:'connected',masked:'••••••••'+r.last4,plan:r.plan||'unknown',updatedAt:r.updatedAt}));
 function rejectSecrets(value,session){const text=JSON.stringify(value);if(connectedProviders(session).some(p=>text.includes(connectionKey(session,p))))fail(422,'La solicitud o respuesta contiene una clave guardada. No se guardó en el proyecto.');}
-function storeConnection(session,provider,record){if(session.catalogCache)delete session.catalogCache[provider];const users=db.users.map(u=>{if(u.id!==session.userId)return u;const connections={...u.connections};if(record)connections[provider]=record;else delete connections[provider];return {...u,connections}});const next={...db,users};writeFileSync(file+'.tmp',JSON.stringify(next));renameSync(file+'.tmp',file);db=next;}
-const save=()=>{writeFileSync(file+'.tmp',JSON.stringify(db));renameSync(file+'.tmp',file)};
-let retired=false;for(const user of db.users)for(const provider of ['zen','cerebras'])if(user.connections?.[provider]){delete user.connections[provider];retired=true}if(retired)save();
+
+async function storeConnection(session,provider,record){
+  if(session.catalogCache)delete session.catalogCache[provider];
+  const connections={...session.connections};
+  if(record)connections[provider]=record;else delete connections[provider];
+  session.connections=connections;
+  await pool.query('UPDATE app_users SET connections = $1 WHERE id = $2', [JSON.stringify(connections), session.userId]);
+}
+
 const publicProject=p=>{const {versions,...fields}=p;return {...fields,canUndo:!!versions?.length}};
-function commitProject(p,next){const replacement={...p,...next};const nextDB={...db,projects:db.projects.map(x=>x===p?replacement:x)};writeFileSync(file+'.tmp',JSON.stringify(nextDB));renameSync(file+'.tmp',file);db=nextDB;return replacement}
+function commitProject(p,next){const replacement={...p,...next};db.projects=db.projects.map(x=>x===p?replacement:x);return replacement}
 function checkpoint(p){return {name:p.name,html:p.html,css:p.css,js:p.js,savedAt:new Date().toISOString()}}
 const sessions=new Map(), attempts=new Map();
 const providers={openrouter:'https://openrouter.ai/api/v1',groq:'https://api.groq.com/openai/v1',google:googleBase};
@@ -44,22 +58,23 @@ export const server=http.createServer(async(req,res)=>{
  if(!['GET','HEAD'].includes(req.method)){const origin=req.headers.origin;if(origin&&origin!==`http://${req.headers.host}`&&origin!==`https://${req.headers.host}`)fail(403,'Origen no permitido.');if(!req.headers['content-type']?.startsWith('application/json'))fail(415,'Se requiere JSON.')}
  const token=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('session='))?.slice(8);
  session=sessions.get(token);if(session&&session.expires<Date.now()){sessions.delete(token);session=null}
+ if(session){const {rows}=await pool.query('SELECT connections FROM app_users WHERE id = $1',[session.userId]);if(rows[0])session.connections=rows[0].connections}
  if(['/api/register','/api/login'].includes(url.pathname)&&req.method==='POST'){
  const b=await body(req), email=String(b.email||'').trim().toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||email.length>254||typeof b.password!=='string'||b.password.length<10||b.password.length>128)fail(400,'Usa un correo válido y una contraseña de 10 a 128 caracteres.');
  const ip=req.socket.remoteAddress;let a=attempts.get(ip);if(!a||a.until<Date.now()){a={count:0,until:Date.now()+600000};attempts.set(ip,a)}if(++a.count>30)fail(429,'Demasiados intentos. Espera diez minutos.');
- let user=db.users.find(u=>u.email===email);
- if(url.pathname==='/api/register'){if(user)fail(409,'El correo ya está registrado.');const salt=randomBytes(16).toString('hex');user={id:randomUUID(),email,salt,hash:scryptSync(b.password,salt,64).toString('hex')};db.users.push(user);save()}
- else {const hash=scryptSync(b.password,user?.salt||'dummy',64);if(!user||!timingSafeEqual(hash,Buffer.from(user.hash,'hex')))fail(401,'Correo o contraseña incorrectos.')}
- if(token)sessions.delete(token);const key=randomBytes(32).toString('hex');sessions.set(key,{userId:user.id,expires:Date.now()+86400000});res.setHeader('Set-Cookie',`session=${key}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${process.env.COOKIE_SECURE==='true'?'; Secure':''}`);json(200,{email:user.email,connected:Object.keys(user.connections||{}),connections:connectionInfo({userId:user.id})});return
+ let user;
+ if(url.pathname==='/api/register'){const {rows}=await pool.query('SELECT id FROM app_users WHERE email = $1',[email]);if(rows.length)fail(409,'El correo ya está registrado.');const salt=randomBytes(16).toString('hex');const id=randomUUID();const hash=scryptSync(b.password,salt,64).toString('hex');await pool.query('INSERT INTO app_users (id, email, salt, hash, connections) VALUES ($1, $2, $3, $4, $5)',[id,email,salt,hash,JSON.stringify({})]);user={id,email,connections:{}}}
+ else {const {rows}=await pool.query('SELECT * FROM app_users WHERE email = $1',[email]);user=rows[0];if(!user)fail(401,'Correo o contraseña incorrectos.');const hash=scryptSync(b.password,user.salt||'dummy',64);if(!timingSafeEqual(hash,Buffer.from(user.hash,'hex')))fail(401,'Correo o contraseña incorrectos.')}
+ if(token)sessions.delete(token);const key=randomBytes(32).toString('hex');sessions.set(key,{userId:user.id,email:user.email,connections:user.connections||{},expires:Date.now()+86400000});res.setHeader('Set-Cookie',`session=${key}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400${process.env.COOKIE_SECURE==='true'?'; Secure':''}`);json(200,{email:user.email,connected:Object.keys(user.connections||{}),connections:Object.entries(user.connections||{}).map(([provider,r])=>({provider,status:'connected',masked:'••••••••'+r.last4,plan:r.plan||'unknown',updatedAt:r.updatedAt}))});return
  }
  if(!session)fail(401,'Inicia sesión para continuar.');
  if(url.pathname==='/api/preview'&&req.method==='POST'){const b=await body(req);const p=cleanProject({...b,name:'Preview'});const id=randomBytes(24).toString('hex');session.preview={id,p};json(200,{url:'/api/preview/'+id});return}
  if(url.pathname.startsWith('/api/preview/')&&req.method==='GET'){if(session.preview?.id!==url.pathname.split('/').pop())fail(404,'Vista previa no encontrada.');const p=session.preview.p;res.setHeader('Content-Type','text/html; charset=utf-8');res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts");res.end('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>'+p.css.replace(/<\/style/gi,'<\\/style')+'</style></head><body>'+p.html+'<script>'+p.js.replace(/<\/script/gi,'<\\/script')+'</script></body></html>');return}
- if(url.pathname==='/api/me'){json(200,{email:db.users.find(u=>u.id===session.userId).email,connected:connectedProviders(session),connections:connectionInfo(session)});return}
+ if(url.pathname==='/api/me'){json(200,{email:session.email,connected:connectedProviders(session),connections:connectionInfo(session)});return}
  if(url.pathname==='/api/logout'&&req.method==='POST'){sessions.delete(token);res.setHeader('Set-Cookie','session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');json(200,{ok:true});return}
  if(url.pathname==='/api/projects'){
  if(req.method==='GET'){json(200,db.projects.filter(p=>p.userId===session.userId).map(publicProject));return}
- if(req.method==='POST'){const b=await body(req);rejectSecrets(b,session);const p={...cleanProject(b),id:randomUUID(),userId:session.userId,updatedAt:new Date().toISOString()};db.projects.push(p);save();json(201,p);return}
+ if(req.method==='POST'){const b=await body(req);rejectSecrets(b,session);const p={...cleanProject(b),id:randomUUID(),userId:session.userId,updatedAt:new Date().toISOString()};db.projects.push(p);json(201,p);return}
  }
  if(url.pathname.startsWith('/api/projects/')){
  const parts=url.pathname.split('/');const p=db.projects.find(p=>p.id===parts[3]&&p.userId===session.userId);if(!p)fail(404,'Proyecto no encontrado.');
@@ -67,19 +82,19 @@ export const server=http.createServer(async(req,res)=>{
  if(parts.length===5&&parts[4]==='undo'&&req.method==='POST'){const b=await body(req);if(b.revision!==(p.revision||0))fail(409,'El proyecto cambió. Recarga antes de deshacer.');if(!p.versions?.length)fail(409,'No hay una versión anterior.');const old=p.versions.at(-1);const restored=commitProject(p,{name:old.name,html:old.html,css:old.css,js:old.js,versions:p.versions.slice(0,-1),revision:(p.revision||0)+1,updatedAt:new Date().toISOString()});json(200,{project:publicProject(restored),content:'Restaurada la versión anterior de index.html, style.css y script.js.'});return}
  if(parts.length!==4)fail(404,'No encontrado.');
  if(req.method==='PUT'){const b=await body(req);rejectSecrets(b,session);if(b.revision!==undefined&&b.revision!==(p.revision||0))fail(409,'El proyecto cambió en otra sesión. Recarga antes de guardar.');const updated=commitProject(p,{...cleanProject(b),revision:(p.revision||0)+1,versions:[...(p.versions||[]),checkpoint(p)].slice(-20),updatedAt:new Date().toISOString()});json(200,publicProject(updated));return}
- if(req.method==='DELETE'){db.projects=db.projects.filter(x=>x!==p);save();json(200,{ok:true});return}}
+ if(req.method==='DELETE'){db.projects=db.projects.filter(x=>x!==p);json(200,{ok:true});return}}
  if(url.pathname==='/api/connections'&&req.method==='GET'){json(200,{connections:connectionInfo(session)});return}
  if(url.pathname==='/api/connections/test'&&req.method==='POST'){
  const b=await body(req);if(!providers[b.provider]||!connectionKey(session,b.provider))fail(400,'Conecta primero el proveedor.');await getCatalog(session,b.provider);
  json(200,{ok:true,connections:connectionInfo(session)});return}
  if((url.pathname==='/api/keys'||url.pathname==='/api/connections')&&req.method==='POST'){
  const b=await body(req);if(!providers[b.provider])fail(400,'Proveedor inválido.');
- if(b.key===''){storeConnection(session,b.provider,null);json(200,{ok:true,connections:connectionInfo(session)});return}
+ if(b.key===''){await storeConnection(session,b.provider,null);json(200,{ok:true,connections:connectionInfo(session)});return}
  if(typeof b.key!=='string'||b.key.length>512||b.key.length<10||/[\r\n]/.test(b.key))fail(400,'Clave inválida.');
  const data=await fetchModelRows(b.provider,b.key,providers[b.provider]);if(!data.ok)fail(400,'No se pudo validar la clave. La conexión anterior se conserva.');if(!Array.isArray(data.rows))fail(502,'Catálogo inválido.');
  const plan=['groq','google'].includes(b.provider)&&['free','paid'].includes(b.plan)?b.plan:'unknown';
  const catalog=await catalogFromRows(b.provider,data.rows,plan);
- storeConnection(session,b.provider,{secret:vault.encrypt(b.key,session.userId,b.provider),last4:b.key.slice(-4),plan,updatedAt:new Date().toISOString()});
+ await storeConnection(session,b.provider,{secret:vault.encrypt(b.key,session.userId,b.provider),last4:b.key.slice(-4),plan,updatedAt:new Date().toISOString()});
  json(200,{models:catalog.map(m=>m.id),catalog,connections:connectionInfo(session)});return}
  if(url.pathname==='/api/models'){const provider=url.searchParams.get('provider');if(!providers[provider]||!connectionKey(session,provider))fail(400,'Conecta primero tu clave.');const catalog=await getCatalog(session,provider);json(200,{models:catalog.map(m=>m.id),catalog});return}
  if(url.pathname==='/api/catalog'){const results=await Promise.all(connectedProviders(session).map(async provider=>{try{return {catalog:await getCatalog(session,provider)}}catch(e){return {catalog:[],error:e.message}}}));json(200,{catalog:results.flatMap(r=>r.catalog),errors:results.filter(r=>r.error).map(r=>r.error)});return}
@@ -120,7 +135,7 @@ export const server=http.createServer(async(req,res)=>{
      const request=attempt.provider==='google'?googleRequest({model:attempt.model,key:connectionKey(session,attempt.provider),system,messages:b.messages,mode}):{url:providers[attempt.provider]+'/chat/completions',options:{method:'POST',headers:{Authorization:`Bearer ${connectionKey(session,attempt.provider)}`,'Content-Type':'application/json'},body:JSON.stringify({model:attempt.model,messages:[{role:'system',content:system},...b.messages],response_format:{type:'json_object'},max_tokens:8192}),signal:AbortSignal.timeout(60000)}};
      const requestBody=JSON.parse(request.options.body);if(attempt.provider==='google')requestBody.generationConfig.maxOutputTokens=context.reserve;else requestBody.max_tokens=context.reserve;request.options.body=JSON.stringify(requestBody);
      const r=await fetch(request.url,request.options);const d=await r.json().catch(()=>({}));
-     if(true){const entry={id:randomUUID(),userId:session.userId,projectId:p.id,conversationId:typeof b.conversationId==='string'?b.conversationId.slice(0,80):'legacy',provider:attempt.provider,model:attempt.model,mode,at:new Date().toISOString(),httpStatus:r.status,...readUsage(attempt.provider,d,r.headers,selected,context)};if(!r.ok&&!d.usage&&!d.usageMetadata){entry.input=0;entry.output=0;entry.inputEstimated=true;entry.outputEstimated=true;entry.cost=selected.status==='free'?0:null;entry.costKind=selected.status==='free'?'free':'unavailable';}db.usage=[...(db.usage||[]),entry];requestUsage=entry;save();}
+     if(true){const entry={id:randomUUID(),userId:session.userId,projectId:p.id,conversationId:typeof b.conversationId==='string'?b.conversationId.slice(0,80):'legacy',provider:attempt.provider,model:attempt.model,mode,at:new Date().toISOString(),httpStatus:r.status,...readUsage(attempt.provider,d,r.headers,selected,context)};if(!r.ok&&!d.usage&&!d.usageMetadata){entry.input=0;entry.output=0;entry.inputEstimated=true;entry.outputEstimated=true;entry.cost=selected.status==='free'?0:null;entry.costKind=selected.status==='free'?'free':'unavailable';}db.usage=[...(db.usage||[]),entry];requestUsage=entry;}
      if(!r.ok){
        if(r.status===401||r.status===403){invalidProviders.add(attempt.provider);throw Error('Clave inválida o revocada.');}
        if(r.status===429)throw Object.assign(Error('Cuota agotada o límite de solicitudes.'),{status:429});
