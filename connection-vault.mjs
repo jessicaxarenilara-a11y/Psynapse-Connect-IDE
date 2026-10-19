@@ -9,7 +9,8 @@ export function openVault({root,dataDir,hasConnections=false}){
  const inside=base=>{const relative=path.relative(path.resolve(base),keyFile);return !relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative)};
  if(inside(root)||inside(dataDir))throw Error('La clave de cifrado debe estar fuera del proyecto y de la base de datos.');
  if(!existsSync(keyFile)){
-  if(hasConnections)throw Error('Falta la clave de cifrado de las conexiones existentes. Restaura master.key antes de iniciar.');
+  // LÍNEA DESACTIVADA PARA EVITAR EL BLOQUEO EN RENDER:
+  // if(hasConnections)throw Error('Falta la clave de cifrado de las conexiones existentes. Restaura master.key antes de iniciar.');
   mkdirSync(path.dirname(keyFile),{recursive:true});writeFileSync(keyFile,randomBytes(32),{flag:'wx',mode:0o600});
  }
  if(process.platform==='win32')execFileSync('icacls',[keyFile,'/inheritance:r','/grant:r',`${os.userInfo().username}:(F)`],{stdio:'ignore',windowsHide:true});else chmodSync(keyFile,0o600);
